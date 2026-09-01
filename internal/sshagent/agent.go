@@ -3,8 +3,6 @@ package sshagent
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"crypto/sha512"
 	"errors"
 	"fmt"
 	"net"
@@ -46,9 +44,7 @@ func (a *Agent) matchesKey(key ssh.PublicKey) bool {
 }
 
 func (a *Agent) Sign(key ssh.PublicKey, data []byte) (*ssh.Signature, error) {
-	// sign with a default functionality (this will fail if used)
-	return nil, fmt.Errorf("server must accept rsa-sha2-256/512 signatures")
-	// return a.SignWithFlags(key, data, 0)
+	return a.SignWithFlags(key, data, 0)
 }
 
 func (a *Agent) Add(key agent.AddedKey) error {
@@ -84,36 +80,37 @@ func (a *Agent) SignWithFlags(
 		return nil, errors.New("requested key does not match agent key")
 	}
 
-	var (
-		digest []byte
-		alg    providers.Algorithm
-		format string
-	)
-
-	switch {
-	case flags&agent.SignatureFlagRsaSha256 != 0:
-		sum := sha256.Sum256(data)
-		digest = sum[:]
-		alg = providers.RSA256
-		format = ssh.KeyAlgoRSASHA256
-	case flags&agent.SignatureFlagRsaSha512 != 0:
-		sum := sha512.Sum512(data)
-		digest = sum[:]
-		alg = providers.RSA512
-		format = ssh.KeyAlgoRSASHA512
-	default:
-		return nil, fmt.Errorf("unknown signature flags: %d", flags)
+	alg, err := a.algorithm(flags)
+	if err != nil {
+		return nil, err
 	}
 
-	signature, err := a.signer.Sign(a.ctx, alg, digest)
+	// The signer receives the raw challenge and returns a wire-ready
+	// signature; all hashing and encoding happen there.
+	sig, err := a.signer.Sign(a.ctx, alg, data)
 	if err != nil {
 		return nil, fmt.Errorf("signing failed: %w", err)
 	}
+	return sig, nil
+}
 
-	return &ssh.Signature{
-		Format: format,
-		Blob:   signature,
-	}, nil
+// algorithm resolves the SSH signature algorithm to request from the signer.
+// For RSA keys it honors the client's rsa-sha2 flags and refuses SHA-1; for
+// ECDSA and Ed25519 keys there is exactly one algorithm and flags are ignored.
+func (a *Agent) algorithm(flags agent.SignatureFlags) (string, error) {
+	keyType := a.signer.PublicKey().Type()
+	if keyType != ssh.KeyAlgoRSA {
+		return keyType, nil
+	}
+
+	switch {
+	case flags&agent.SignatureFlagRsaSha512 != 0:
+		return ssh.KeyAlgoRSASHA512, nil
+	case flags&agent.SignatureFlagRsaSha256 != 0:
+		return ssh.KeyAlgoRSASHA256, nil
+	default:
+		return "", errors.New("RSA SHA-1 signatures are not supported; the server must offer rsa-sha2-256 or rsa-sha2-512")
+	}
 }
 
 func (a *Agent) Extension(extensionType string, contents []byte) ([]byte, error) {

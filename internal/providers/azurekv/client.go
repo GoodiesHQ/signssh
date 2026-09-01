@@ -2,12 +2,13 @@ package azurekv
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/sha512"
 	"fmt"
 	"strings"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/security/keyvault/azkeys"
 	"github.com/goodieshq/signssh/pkg/providers"
-	"github.com/goodieshq/signssh/utils"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -43,14 +44,22 @@ func (kv *KeyVault) GetPublicKey(ctx context.Context, keyName string) (ssh.Publi
 		return nil, fmt.Errorf("key %s has no public key", keyName)
 	}
 
-	publicKey, err := utils.JwkToRSA(resp.Key, keyName)
+	var pubKey any
+	switch *resp.Key.Kty {
+	case azkeys.KeyTypeRSA, azkeys.KeyTypeRSAHSM:
+		pubKey, err = jwkToRSA(resp.Key, keyName)
+	case azkeys.KeyTypeEC, azkeys.KeyTypeECHSM:
+		pubKey, err = jwkToECDSA(resp.Key, keyName)
+	default:
+		return nil, fmt.Errorf("key %s uses unsupported type %s", keyName, string(*resp.Key.Kty))
+	}
 	if err != nil {
-		return nil, fmt.Errorf("convert JWK to RSA: %w", err)
+		return nil, err
 	}
 
-	sshPubKey, err := ssh.NewPublicKey(publicKey)
+	sshPubKey, err := ssh.NewPublicKey(pubKey)
 	if err != nil {
-		return nil, fmt.Errorf("convert RSA to SSH public key: %w", err)
+		return nil, fmt.Errorf("convert %s key to SSH public key: %w", keyName, err)
 	}
 
 	return sshPubKey, nil
@@ -119,29 +128,55 @@ func (sig *signerKeyVault) PublicKey() ssh.PublicKey {
 	return sig.pubKey
 }
 
-func (sig *signerKeyVault) Sign(ctx context.Context, alg providers.Algorithm, data []byte) ([]byte, error) {
-	algAz, err := azureAlg(alg)
+func (sig *signerKeyVault) Algorithms() []string {
+	return providers.AlgorithmsFor(sig.pubKey.Type())
+}
+
+func (sig *signerKeyVault) Sign(ctx context.Context, algorithm string, data []byte) (*ssh.Signature, error) {
+	azAlg, digest, isECDSA, err := azureSignParams(algorithm, data)
 	if err != nil {
 		return nil, err
 	}
 
 	resp, err := sig.keys.Sign(ctx, sig.keyName, "", azkeys.SignParameters{
-		Algorithm: &algAz,
-		Value:     data,
+		Algorithm: &azAlg,
+		Value:     digest,
 	}, nil)
 	if err != nil {
-		return nil, fmt.Errorf("sign data: %w", err)
+		return nil, fmt.Errorf("azure key vault sign: %w", err)
 	}
 
-	return resp.Result, nil
+	blob := resp.Result
+	if isECDSA {
+		// Key Vault returns the ECDSA signature IEEE P1363
+		blob, err = ecdsaP1363ToSSHBlob(resp.Result)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return &ssh.Signature{Format: algorithm, Blob: blob}, nil
 }
 
-func azureAlg(alg providers.Algorithm) (azkeys.SignatureAlgorithm, error) {
-	switch alg {
-	case providers.RSA256:
-		return azkeys.SignatureAlgorithmRS256, nil
-	case providers.RSA512:
-		return azkeys.SignatureAlgorithmRS512, nil
+// azureSignParams maps an SSH signature algorithm to the Key Vault algorithm and digest
+func azureSignParams(algorithm string, data []byte) (alg azkeys.SignatureAlgorithm, digest []byte, isECDSA bool, err error) {
+	switch algorithm {
+	case ssh.KeyAlgoRSASHA256:
+		h := sha256.Sum256(data)
+		return azkeys.SignatureAlgorithmRS256, h[:], false, nil
+	case ssh.KeyAlgoRSASHA512:
+		h := sha512.Sum512(data)
+		return azkeys.SignatureAlgorithmRS512, h[:], false, nil
+	case ssh.KeyAlgoECDSA256:
+		h := sha256.Sum256(data)
+		return azkeys.SignatureAlgorithmES256, h[:], true, nil
+	case ssh.KeyAlgoECDSA384:
+		h := sha512.Sum384(data)
+		return azkeys.SignatureAlgorithmES384, h[:], true, nil
+	case ssh.KeyAlgoECDSA521:
+		h := sha512.Sum512(data)
+		return azkeys.SignatureAlgorithmES512, h[:], true, nil
+	default:
+		return "", nil, false, fmt.Errorf("azure key vault: unsupported signature algorithm %q", algorithm)
 	}
-	return "", fmt.Errorf("unsupported signing algorithm")
 }

@@ -2,7 +2,8 @@ package local
 
 import (
 	"context"
-	"crypto/rsa"
+	"crypto"
+	"crypto/ed25519"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,6 +12,8 @@ import (
 	"github.com/urfave/cli/v3"
 	"golang.org/x/crypto/ssh"
 )
+
+var defaultKeyNames = []string{"id_ed25519", "id_ecdsa", "id_rsa"}
 
 func init() {
 	providers.Register(register())
@@ -33,7 +36,16 @@ func register() providers.Registration {
 					return nil, fmt.Errorf("unable to get home dir: %w", err)
 				}
 
-				path = filepath.Join(home, ".ssh", "id_rsa")
+				for _, name := range defaultKeyNames {
+					candidate := filepath.Join(home, ".ssh", name)
+					if _, err := os.Stat(candidate); err == nil {
+						path = candidate
+						break
+					}
+				}
+				if path == "" {
+					return nil, fmt.Errorf("no default key found in ~/.ssh (%v); set --local-key-path", defaultKeyNames)
+				}
 			}
 
 			return func(ctx context.Context) (providers.Backend, error) {
@@ -48,7 +60,7 @@ func register() providers.Registration {
 	}
 }
 
-func readPrivateKey(filename string, password string) (*rsa.PrivateKey, error) {
+func readPrivateKey(filename string, password string) (crypto.Signer, error) {
 	data, err := os.ReadFile(filename)
 	if err != nil {
 		return nil, err
@@ -65,12 +77,18 @@ func readPrivateKey(filename string, password string) (*rsa.PrivateKey, error) {
 		return nil, err
 	}
 
-	rsaKey, ok := key.(*rsa.PrivateKey)
-	if !ok {
-		return nil, fmt.Errorf("local provider only supports RSA keys, got %T", key)
+	// ssh.ParseRawPrivateKey returns *ed25519.PrivateKey; crypto.Signer is
+	// implemented by the value type.
+	if p, ok := key.(*ed25519.PrivateKey); ok {
+		key = *p
 	}
 
-	return rsaKey, nil
+	signer, ok := key.(crypto.Signer)
+	if !ok {
+		return nil, fmt.Errorf("local provider: unsupported key type %T (want RSA, ECDSA, or Ed25519)", key)
+	}
+
+	return signer, nil
 }
 
 func flags() []cli.Flag {
