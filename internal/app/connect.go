@@ -12,7 +12,7 @@ import (
 	"github.com/goodieshq/signssh/pkg/providers"
 )
 
-func runConnect(ctx context.Context, keyName string, dest *conn.Destination, provider providers.Provider, debug bool) error {
+func runConnect(ctx context.Context, keyName string, dest *conn.Destination, provider providers.Provider, debug bool, sshArgs []string) error {
 	ctxTimed, cancel := context.WithTimeout(ctx, 120*time.Second)
 	defer cancel()
 
@@ -49,5 +49,6 @@ func runConnect(ctx context.Context, keyName string, dest *conn.Destination, pro
 		agentIPC.Endpoint,
 		dest,
 		debug,
+		sshArgs,
 	)
 }

@@ -34,17 +34,20 @@ func Run(ctx context.Context, args []string) int {
 		return 1
 	}
 
+	// Everything after a lone "--" is handed verbatim to the ssh child.
+	cliArgs, sshExtra := splitPassthrough(args)
+
 	root := &cli.Command{
 		Name:    config.AppName,
 		Version: config.AppVersion,
 		Usage:   "SSH using a signing provider as your private key",
 		UsageText: strings.Join([]string{
-			"signssh <provider> [options] <key-name> [user@]<host>[:port]",
+			"signssh <provider> [options] <key-name> [user@]<host>[:port] [-- <ssh args>]",
 			"signssh <provider> --list",
 			"signssh <provider> --public <key-name>",
 		}, "\n"),
 		Flags:          rootFlags,
-		Commands:       providerCommands(),
+		Commands:       providerCommands(sshExtra),
 		ExitErrHandler: func(context.Context, *cli.Command, error) {},
 		Action: func(_ context.Context, cmd *cli.Command) error {
 			// reached when the first argument was not a known provider
@@ -66,7 +69,7 @@ func Run(ctx context.Context, args []string) int {
 		root.DefaultCommand = envProvider
 	}
 
-	err := root.Run(ctx, args)
+	err := root.Run(ctx, cliArgs)
 	if err == nil {
 		return 0
 	}
@@ -150,32 +153,41 @@ func knownProvider(name string) bool {
 	return false
 }
 
-func providerCommands() []*cli.Command {
+func splitPassthrough(args []string) (head, tail []string) {
+	for i, a := range args {
+		if a == "--" {
+			return args[:i], args[i+1:]
+		}
+	}
+	return args, nil
+}
+
+func providerCommands(sshExtra []string) []*cli.Command {
 	regs := providers.All()
 	cmds := make([]*cli.Command, 0, len(regs))
 	for _, reg := range regs {
-		cmds = append(cmds, providerCommand(reg))
+		cmds = append(cmds, providerCommand(reg, sshExtra))
 	}
 	return cmds
 }
 
-func providerCommand(reg providers.Registration) *cli.Command {
+func providerCommand(reg providers.Registration, sshExtra []string) *cli.Command {
 	return &cli.Command{
 		Name:  reg.Name,
 		Usage: reg.Usage,
 		UsageText: strings.Join([]string{
-			fmt.Sprintf("signssh %s [options] <key-name> [user@]<host>[:port]", reg.Name),
+			fmt.Sprintf("signssh %s [options] <key-name> [user@]<host>[:port] [-- <ssh args>]", reg.Name),
 			fmt.Sprintf("signssh %s --list", reg.Name),
 			fmt.Sprintf("signssh %s --public <key-name>", reg.Name),
 		}, "\n"),
 		Flags: slices.Concat(slices.Clone(reg.Flags), commonActionFlags()),
 		Action: func(ctx context.Context, cmd *cli.Command) error {
-			return runProvider(ctx, cmd, reg)
+			return runProvider(ctx, cmd, reg, sshExtra)
 		},
 	}
 }
 
-func runProvider(ctx context.Context, cmd *cli.Command, reg providers.Registration) error {
+func runProvider(ctx context.Context, cmd *cli.Command, reg providers.Registration, sshExtra []string) error {
 	cfg := config.FromCmd(cmd)
 
 	provider, err := reg.Prepare(cmd)
@@ -234,7 +246,11 @@ func runProvider(ctx context.Context, cmd *cli.Command, reg providers.Registrati
 	if dest.User == "" {
 		dest.User = cfg.Username
 	}
-	return runConnect(ctx, cfg.Prefix+key, dest, provider, cfg.Debug)
+
+	// ssh options: "-- <args>" from the command line first, then $SIGNSSH_SSH_ARGS.
+	sshArgs := append(slices.Clone(sshExtra), strings.Fields(os.Getenv("SIGNSSH_SSH_ARGS"))...)
+
+	return runConnect(ctx, cfg.Prefix+key, dest, provider, cfg.Debug, sshArgs)
 }
 
 func normalizeArg(s string) string {

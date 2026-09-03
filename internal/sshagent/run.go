@@ -12,7 +12,12 @@ import (
 	"github.com/goodieshq/signssh/internal/conn"
 )
 
-func RunSSH(ctx context.Context, identityAgent string, dest *conn.Destination, debug bool) error {
+// RunSSH launches the OpenSSH client against the ephemeral agent. extraArgs are
+// user-supplied options (everything after a "--" on the signssh command line,
+// plus $SIGNSSH_SSH_ARGS) inserted in ssh's option position. They cannot
+// override signssh's own -o settings: ssh uses the first value it sees for each
+// option.
+func RunSSH(ctx context.Context, identityAgent string, dest *conn.Destination, debug bool, extraArgs []string) error {
 	sshPath, err := exec.LookPath("ssh")
 	if err != nil {
 		return fmt.Errorf("OpenSSH client not found: %w", err)
@@ -33,6 +38,8 @@ func RunSSH(ctx context.Context, identityAgent string, dest *conn.Destination, d
 		"-o", "PasswordAuthentication=no",
 		"-o", "KbdInteractiveAuthentication=no",
 	)
+
+	args = append(args, extraArgs...)
 
 	if dest.Port == 0 {
 		dest.Port = 22
