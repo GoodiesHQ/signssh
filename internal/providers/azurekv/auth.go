@@ -54,7 +54,8 @@ func newCredential(ctx context.Context, tenantID, clientID, scope string) (azcor
 	// A zero AuthenticationRecord means this machine/user hasn't authenticated to this tenant/client yet
 	if record == (azidentity.AuthenticationRecord{}) {
 		record, err = cred.Authenticate(ctx, &policy.TokenRequestOptions{
-			Scopes: []string{scope},
+			Scopes:    []string{scope},
+			EnableCAE: true,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("interactive authentication failed: %w", err)
