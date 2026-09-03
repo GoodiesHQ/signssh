@@ -30,6 +30,7 @@ var (
 	DIST_DIR     = "dist"
 	VERSION_FILE = "./VERSION"
 	VERSION      = "dev"
+	VERSIONLOC   = "github.com/goodieshq/signssh/internal/config.AppVersion"
 )
 
 const DEFAULT_VERSION = ""
@@ -83,7 +84,7 @@ func main() {
 	targets := flag.String("targets", "", "specific OS/ARCH target to build (format: os/arch)")
 	release := flag.Bool("release", false, "build for release (stripped binaries)")
 	version := flag.String("version", "", "version to embed in the binary (overrides VERSION file)")
-	versionLocation := flag.String("version-location", "main.Version", "location of the version file (overrides VERSION_FILE)")
+	versionLocation := flag.String("version-location", VERSIONLOC, "ldflags -X target: <full import path>.<VarName>")
 
 	flag.Parse()
 
