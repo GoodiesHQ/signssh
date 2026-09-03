@@ -14,7 +14,7 @@ func init() {
 	providers.Register(register())
 }
 
-// Name is the --provider value for this provider.
+// Name is this provider's subcommand name.
 const Name = "azure-key-vault"
 
 // defaultClientID is the Microsoft Azure CLI public client ID.
@@ -23,6 +23,7 @@ const defaultClientID = "1950a258-227b-4e31-a9cf-717495945fc2"
 func register() providers.Registration {
 	return providers.Registration{
 		Name:  Name,
+		Usage: "Sign with a key stored in Azure Key Vault",
 		Flags: flags(),
 		Prepare: func(cmd *cli.Command) (providers.Provider, error) {
 			// Validate the required values
@@ -77,6 +78,7 @@ func flags() []cli.Flag {
 		},
 		&cli.StringFlag{
 			Name:    "azure-environment",
+			Usage:   "Azure Cloud: global, government, or china",
 			Value:   "global",
 			Sources: cli.EnvVars("SIGNSSH_AZURE_ENVIRONMENT"),
 		},

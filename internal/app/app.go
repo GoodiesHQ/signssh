@@ -29,39 +29,60 @@ func Run(ctx context.Context, args []string) int {
 		stop()
 	}()
 
-	_, err := exec.LookPath("ssh")
-	if err != nil {
+	if _, err := exec.LookPath("ssh"); err != nil {
 		fmt.Fprintln(os.Stderr, "OpenSSH client 'ssh' not found")
 		return 1
 	}
 
-	cmd := &cli.Command{
+	root := &cli.Command{
 		Name:    config.AppName,
 		Version: config.AppVersion,
-		Usage:   "SSH wrapper using a signing provider as a private key",
-		UsageText: "signssh [options] <key-name> [user@]<hostname[:port]>" +
-			"\n" + "signssh [options] --list",
-		Flags:          allFlags(),
+		Usage:   "SSH using a signing provider as your private key",
+		UsageText: strings.Join([]string{
+			"signssh <provider> [options] <key-name> [user@]<host>[:port]",
+			"signssh <provider> --list",
+			"signssh <provider> --public <key-name>",
+		}, "\n"),
+		Flags:          rootFlags,
+		Commands:       providerCommands(),
 		ExitErrHandler: func(context.Context, *cli.Command, error) {},
-		Action:         run,
+		Action: func(_ context.Context, cmd *cli.Command) error {
+			// reached when the first argument was not a known provider
+			if cmd.Args().Present() {
+				return exitErr(fmt.Sprintf("unknown provider %q; run 'signssh --help' for the list", cmd.Args().First()))
+			}
+			return cli.ShowAppHelp(cmd)
+		},
 	}
 
-	err = cmd.Run(ctx, args)
+	// SIGNSSH_PROVIDER selects the provider subcommand when the user does not
+	// type one, so an operator can push hidden env and employees just run
+	// `signssh [<key>] [user@]<host>`. An explicit subcommand still wins.
+	if envProvider := strings.ToLower(strings.TrimSpace(os.Getenv("SIGNSSH_PROVIDER"))); envProvider != "" {
+		if !knownProvider(envProvider) {
+			fmt.Fprintf(os.Stderr, "SIGNSSH_PROVIDER=%q is not a registered provider\n", envProvider)
+			return 2
+		}
+		root.DefaultCommand = envProvider
+	}
+
+	err := root.Run(ctx, args)
 	if err == nil {
 		return 0
 	}
 
+	// interrupted by a signal
 	if ctx.Err() != nil {
 		return 130
 	}
 
-	// ssh child process completed and retured non-zero
+	// the ssh child ran and exited non-zero: mirror its status, stay quiet
 	var execErr *exec.ExitError
 	if errors.As(err, &execErr) {
 		return execErr.ExitCode()
 	}
 
-	// print any cli.Exit(...) error from arg validation/provider setup
+	// a cli.Exit(...) from arg validation / provider setup
 	var exitCoder cli.ExitCoder
 	if errors.As(err, &exitCoder) {
 		if msg := exitCoder.Error(); msg != "" {
@@ -74,87 +95,10 @@ func Run(ctx context.Context, args []string) int {
 	return 1
 }
 
-func run(ctx context.Context, cmd *cli.Command) error {
-	cfg, provider, err := config.FromCmd(cmd)
-	if err != nil {
-		return err
-	}
-
-	// if the --list flag is set, list available keys and exit
-	if cmd.Bool("list") {
-		if cmd.NArg() != 0 {
-			return exitErr("--list does not accept positional arguments")
-		}
-
-		return runList(ctx, cfg, provider)
-	}
-
-	// if the --public flag is set, only the key name must be set
-	if cmd.Bool("public") {
-		if cmd.NArg() != 1 {
-			return exitErr("--public requires only the name of the key")
-		}
-		keyName := strings.ToLower(strings.TrimSpace(cmd.Args().Get(0)))
-		return runPublic(ctx, cfg, provider, keyName)
-	}
-
-	// now we can assume the desire is to run a new connection
-	if cmd.NArg() != 2 {
-		return exitErr("expecting <key-name> [user@]<hostname[:port]>")
-	}
-
-	keyName := strings.ToLower(strings.TrimSpace(cmd.Args().Get(0)))
-	keyNameFull := cfg.Prefix + keyName
-	target := cmd.Args().Get(1)
-
-	dest, err := conn.ParseDestination(target)
-	if err != nil {
-		return exitErr(err)
-	}
-
-	if dest.User == "" {
-		dest.User = cfg.Username
-	}
-
-	return runConnect(ctx, keyNameFull, dest, provider, cfg.Debug)
-}
-
-func allFlags() []cli.Flag {
-	return slices.Concat(flagsDefault, providers.AllFlags())
-}
-
-var flagsDefault = []cli.Flag{
-	&cli.StringFlag{
-		Name:    "provider",
-		Usage:   "Signing provider",
-		Sources: cli.EnvVars("SIGNSSH_PROVIDER"),
-	},
-	&cli.StringFlag{
-		Name:    "prefix",
-		Usage:   "Key name prefix to filter keys",
-		Sources: cli.EnvVars("SIGNSSH_PREFIX"),
-	},
-	&cli.StringFlag{
-		Name:    "username",
-		Aliases: []string{"u"},
-		Usage:   "SSH username",
-		Sources: cli.EnvVars("SIGNSSH_USERNAME"),
-	},
-	&cli.BoolFlag{
-		Name:    "list",
-		Aliases: []string{"l"},
-		Usage:   "List all available keys from the provider",
-	},
-	&cli.BoolFlag{
-		Name:    "public",
-		Aliases: []string{"p"},
-		Usage:   "Print the OpenSSH public key for <key-name> and exit",
-	},
-	&cli.BoolFlag{
-		Name:    "logout",
-		Usage:   "Log out and destroy the current session",
-		Sources: cli.EnvVars("SIGNSSH_LOGOUT"),
-	},
+// rootFlags live on the root command. urfave/cli v3 flags are persistent by
+// default, so these are inherited by every provider subcommand and shown
+// under GLOBAL OPTIONS.
+var rootFlags = []cli.Flag{
 	&cli.BoolFlag{
 		Name:    "debug",
 		Aliases: []string{"v"},
@@ -163,13 +107,148 @@ var flagsDefault = []cli.Flag{
 	},
 }
 
-// exitErr wraps an error as a CLI exit with a standard status code
+// commonActionFlags are added to every provider subcommand alongside its own
+// provider flags.
+func commonActionFlags() []cli.Flag {
+	return []cli.Flag{
+		&cli.StringFlag{
+			Name:    "prefix",
+			Usage:   "Prepended to <key-name> and stripped from --list output",
+			Sources: cli.EnvVars("SIGNSSH_PREFIX"),
+		},
+		&cli.StringFlag{
+			Name:    "username",
+			Aliases: []string{"u"},
+			Usage:   "SSH username (a user@ in the destination wins)",
+			Sources: cli.EnvVars("SIGNSSH_USERNAME"),
+		},
+		&cli.StringFlag{
+			Name:    "key",
+			Aliases: []string{"k"},
+			Usage:   "Key name to use when it is not given as an argument",
+			Sources: cli.EnvVars("SIGNSSH_KEY"),
+		},
+		&cli.BoolFlag{
+			Name:    "list",
+			Aliases: []string{"l"},
+			Usage:   "List available keys and exit",
+		},
+		&cli.BoolFlag{
+			Name:    "public",
+			Aliases: []string{"p"},
+			Usage:   "Print the OpenSSH public key for <key-name> and exit",
+		},
+	}
+}
+
+func knownProvider(name string) bool {
+	for _, reg := range providers.All() {
+		if reg.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+func providerCommands() []*cli.Command {
+	regs := providers.All()
+	cmds := make([]*cli.Command, 0, len(regs))
+	for _, reg := range regs {
+		cmds = append(cmds, providerCommand(reg))
+	}
+	return cmds
+}
+
+func providerCommand(reg providers.Registration) *cli.Command {
+	return &cli.Command{
+		Name:  reg.Name,
+		Usage: reg.Usage,
+		UsageText: strings.Join([]string{
+			fmt.Sprintf("signssh %s [options] <key-name> [user@]<host>[:port]", reg.Name),
+			fmt.Sprintf("signssh %s --list", reg.Name),
+			fmt.Sprintf("signssh %s --public <key-name>", reg.Name),
+		}, "\n"),
+		Flags: slices.Concat(slices.Clone(reg.Flags), commonActionFlags()),
+		Action: func(ctx context.Context, cmd *cli.Command) error {
+			return runProvider(ctx, cmd, reg)
+		},
+	}
+}
+
+func runProvider(ctx context.Context, cmd *cli.Command, reg providers.Registration) error {
+	cfg := config.FromCmd(cmd)
+
+	provider, err := reg.Prepare(cmd)
+	if err != nil {
+		return exitErr(err)
+	}
+
+	posArgs := cmd.Args().Slice()
+
+	// A key name may come from a positional arg or, when it is not typed, from
+	// --key / $SIGNSSH_KEY.
+	flagKey := normalizeArg(cmd.String("key"))
+
+	switch {
+	case cmd.Bool("list"):
+		if len(posArgs) != 0 {
+			return exitErr("--list does not take arguments")
+		}
+		return runList(ctx, cfg, provider)
+
+	case cmd.Bool("public"):
+		key := flagKey
+		switch len(posArgs) {
+		case 0:
+			if key == "" {
+				return exitErr("--public needs a key: pass <key-name> or set SIGNSSH_KEY")
+			}
+		case 1:
+			key = normalizeArg(posArgs[0])
+		default:
+			return exitErr("--public takes at most one <key-name>")
+		}
+		return runPublic(ctx, cfg, provider, key)
+	}
+
+	// connect
+	var key, target string
+	switch len(posArgs) {
+	case 0:
+		return cli.ShowSubcommandHelp(cmd)
+	case 1:
+		if flagKey == "" {
+			return exitErr("missing destination: give <key-name> [user@]<host>[:port], or set SIGNSSH_KEY and pass just [user@]<host>[:port]")
+		}
+		key, target = flagKey, posArgs[0]
+	case 2:
+		key, target = normalizeArg(posArgs[0]), posArgs[1]
+	default:
+		return exitErr("too many arguments; expected <key-name> [user@]<host>[:port]")
+	}
+
+	dest, err := conn.ParseDestination(target)
+	if err != nil {
+		return exitErr(err)
+	}
+	if dest.User == "" {
+		dest.User = cfg.Username
+	}
+	return runConnect(ctx, cfg.Prefix+key, dest, provider, cfg.Debug)
+}
+
+func normalizeArg(s string) string {
+	return strings.ToLower(strings.TrimSpace(s))
+}
+
+// exitErr wraps an error or message as a CLI exit with a standard status code.
 func exitErr(err any) error {
-	if err, ok := err.(error); ok {
-		return cli.Exit(err.Error(), 2)
+	switch v := err.(type) {
+	case error:
+		return cli.Exit(v.Error(), 2)
+	case string:
+		return cli.Exit(v, 2)
+	default:
+		return cli.Exit(fmt.Sprintf("%+v", v), 2)
 	}
-	if err, ok := err.(string); ok {
-		return cli.Exit(err, 2)
-	}
-	return cli.Exit(fmt.Sprintf("%+v", err), 2)
 }
