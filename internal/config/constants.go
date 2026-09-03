@@ -1,6 +1,5 @@
 package config
 
-const (
-	AppName    = "signssh"
-	AppVersion = "0.1.0"
-)
+const AppName = "signssh"
+
+var AppVersion = "dev"
