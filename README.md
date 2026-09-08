@@ -2,6 +2,8 @@
 
 A cross-platform SSH client wrapper that signs with remotely-held keys through an ephemeral SSH agent, so a private key never has to live on the workstation.
 
+![SignSSH Steps](./SignSSH.png)
+
 `signssh` retrieves the public key from a given provider, begins an ephemeral OpenSSH-compatible agent on a private IPC socket, runs the `ssh` command using the agent, and tears the socket down on exit. Every signing operation is delegated to the provider (with external key management systems, the private key never leaves the vault/HSM). **Note:** The 'local' provider is mainly for testing and still uses local private keys.
 
 ## Install
